@@ -5,6 +5,8 @@
 #include <math.h>
 #include "CL/cl.h"
 
+char* read_file(const char* fileName);
+
 double get_time(void) {
 	struct timeval tv;
 	if (gettimeofday(&tv, NULL) != 0) {
@@ -144,18 +146,46 @@ int argc, char* argv[]) {
 	cl_int error;
 
 	int size = (argc > 0 ? atoi(argv[0]) : 1024);
+	char* read_kernel = NULL;
 	float *a, *b, *out, *out_normal;
 	size_t matrix_data_size;
 	cl_mem a_cl, b_cl, out_cl;
 	size_t global_size[2], local_size[2] = {8, 8};
+	char option[1024];
 	double time_start, time_end, flop;
 	int i;
 	float diff_sum;
+	int skip_normal = 0, skip_slow_normal = 0;
+	char *env_str;
+
+	env_str = getenv("SKIP_NORMAL");
+	if (env_str != NULL) skip_normal = atoi(env_str);
+	env_str = getenv("SKIP_SLOW_NORMAL");
+	if (env_str != NULL) skip_slow_normal = atoi(env_str);
 
 	if (size <= 0) {
 		fputs("matrix size must be positive\n", stderr);
 		return 1;
 	}
+
+	if (argc > 1) {
+		read_kernel = read_file(argv[1]);
+		if (read_kernel != NULL) {
+			printf("read kernel from %s\n", argv[1]);
+		} else {
+			printf("failed to read kernel from %s!\n", argv[1]);
+		}
+	}
+	if (argc > 2) {
+		int t_size;
+		t_size = atoi(argv[2]);
+		if (t_size <= 0) {
+			fputs("local size must be positive\n", stderr);
+			return 1;
+		}
+		local_size[0] = local_size[1] = t_size;
+	}
+	printf("local block size: %zu\n", local_size[0]);
 
 	global_size[0] = ((size + local_size[0] - 1) / local_size[0]) * local_size[0];
 	global_size[1] = ((size + local_size[1] - 1) / local_size[1]) * local_size[1];
@@ -183,7 +213,8 @@ int argc, char* argv[]) {
 		return 1;
 	}
 
-	program = clCreateProgramWithSource(context, 1, &kernel_code, NULL, &error);
+	program = clCreateProgramWithSource(context, 1,
+		read_kernel != NULL ? (const char**)&read_kernel : &kernel_code, NULL, &error);
 	if (error != CL_SUCCESS) {
 		fprintf(stderr, "clCreateProgramWithSource failed: %d\n", (int)error);
 		free(a); free(b); free(out); free(out_normal);
@@ -191,7 +222,8 @@ int argc, char* argv[]) {
 		return 1;
 	}
 
-	if ((error = clBuildProgram(program, 1, &device, "-w", NULL, NULL)) != CL_SUCCESS) {
+	snprintf(option, sizeof(option), "-w -D LOCAL_BLOCK_SIZE=%zu", local_size[0]);
+	if ((error = clBuildProgram(program, 1, &device, option, NULL, NULL)) != CL_SUCCESS) {
 		fprintf(stderr, "clBuildProgram failed: %d\n", (int)error);
 		free(a); free(b); free(out); free(out_normal);
 		clReleaseProgram(program);
@@ -242,33 +274,41 @@ int argc, char* argv[]) {
 
 	printf("start calculation of size %d\n", size);
 
-	time_start = get_time();
-	matmul_normal(a, b, out_normal, size);
-	time_end = get_time();
-	printf("normal  calculaton time: %f seconds (%fGflop/s)\n", time_end - time_start,
-		flop / (time_end - time_start) * 1e-9);
-
-	time_start = get_time();
-	matmul_normal2(a, b, out, size);
-	time_end = get_time();
-	printf("normal2 calculaton time: %f seconds (%fGflop/s)\n", time_end - time_start,
-		flop / (time_end - time_start) * 1e-9);
-	diff_sum = 0;
-	for (i = 0; i < size * size; i++) {
-		diff_sum += fabs(out[i] - out_normal[i]);
+	if (!skip_normal && !skip_slow_normal) {
+		time_start = get_time();
+		matmul_normal(a, b, out_normal, size);
+		time_end = get_time();
+		printf("normal  calculaton time: %f seconds (%fGflop/s)\n", time_end - time_start,
+			flop / (time_end - time_start) * 1e-9);
 	}
-	printf("average difference with normal: %g\n", diff_sum / (size * size));
 
-	time_start = get_time();
-	matmul_normal3(a, b, out, size);
-	time_end = get_time();
-	printf("normal3 calculaton time: %f seconds (%fGflop/s)\n", time_end - time_start,
-		flop / (time_end - time_start) * 1e-9);
-	diff_sum = 0;
-	for (i = 0; i < size * size; i++) {
-		diff_sum += fabs(out[i] - out_normal[i]);
+	if (!skip_normal) {
+		time_start = get_time();
+		matmul_normal2(a, b, out, size);
+		time_end = get_time();
+		printf("normal2 calculaton time: %f seconds (%fGflop/s)\n", time_end - time_start,
+			flop / (time_end - time_start) * 1e-9);
+		if (!skip_slow_normal) {
+			diff_sum = 0;
+			for (i = 0; i < size * size; i++) {
+				diff_sum += fabs(out[i] - out_normal[i]);
+			}
+			printf("average difference with normal: %g\n", diff_sum / (size * size));
+		}
+
+		time_start = get_time();
+		matmul_normal3(a, b, out, size);
+		time_end = get_time();
+		printf("normal3 calculaton time: %f seconds (%fGflop/s)\n", time_end - time_start,
+			flop / (time_end - time_start) * 1e-9);
+		if (!skip_slow_normal) {
+			diff_sum = 0;
+			for (i = 0; i < size * size; i++) {
+				diff_sum += fabs(out[i] - out_normal[i]);
+			}
+			printf("average difference with normal: %g\n", diff_sum / (size * size));
+		}
 	}
-	printf("average difference with normal: %g\n", diff_sum / (size * size));
 
 	time_start = get_time();
 
@@ -307,17 +347,20 @@ int argc, char* argv[]) {
 	time_end = get_time();
 	printf("OpenCL  calculaton time: %f seconds (%fGflop/s)\n", time_end - time_start,
 		flop / (time_end - time_start) * 1e-9);
-	diff_sum = 0;
-	for (i = 0; i < size * size; i++) {
-		diff_sum += fabs(out[i] - out_normal[i]);
+	if (!skip_normal && !skip_slow_normal) {
+		diff_sum = 0;
+		for (i = 0; i < size * size; i++) {
+			diff_sum += fabs(out[i] - out_normal[i]);
+		}
+		printf("average difference with normal: %g\n", diff_sum / (size * size));
 	}
-	printf("average difference with normal: %g\n", diff_sum / (size * size));
 
 #undef CALL_AND_CHECK
 	free(a);
 	free(b);
 	free(out);
 	free(out_normal);
+	free(read_kernel);
 	clReleaseMemObject(a_cl);
 	clReleaseMemObject(b_cl);
 	clReleaseMemObject(out_cl);

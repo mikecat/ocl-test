@@ -131,6 +131,7 @@ char* read_file(const char* fileName) {
 			free(result);
 			return NULL;
 		}
+		result = new_result;
 		readLength = fread(result + start, 1, READ_CHUNK, fp);
 		if (readLength < READ_CHUNK) {
 			if (feof(fp)) {

@@ -1,0 +1,21 @@
+__kernel __attribute__((reqd_work_group_size(LOCAL_BLOCK_SIZE, LOCAL_BLOCK_SIZE, 1)))
+void matmul(__global float* a, __global float* b, __global float* out, int size) {
+  int i = get_global_id(0);
+  int j = get_global_id(1);
+  int li = get_local_id(0);
+  int lj = get_local_id(1);
+  int k, lk;
+  __local float a_buf[LOCAL_BLOCK_SIZE][LOCAL_BLOCK_SIZE];
+  __local float b_buf[LOCAL_BLOCK_SIZE][LOCAL_BLOCK_SIZE];
+  float ret = 0;
+  for (k = 0; k < size; k += LOCAL_BLOCK_SIZE) {
+    barrier(CLK_LOCAL_MEM_FENCE);
+    a_buf[li][lj] = (i < size && k + lj < size ? a[i * size + (k + lj)] : 0.0f);
+    b_buf[li][lj] = (k + li < size && j < size ? b[(k + li) * size + j] : 0.0f);
+    barrier(CLK_LOCAL_MEM_FENCE);
+    for (lk = 0; lk < LOCAL_BLOCK_SIZE; lk++) {
+      ret += a_buf[li][lk] * b_buf[lk][lj];
+    }
+  }
+  if (i < size && j < size) out[i * size + j] = ret;
+}
