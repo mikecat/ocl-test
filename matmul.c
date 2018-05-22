@@ -1,5 +1,6 @@
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <sys/time.h>
 #include <math.h>
 #include "CL/cl.h"
@@ -43,6 +44,95 @@ void matmul_normal(const float* a, const float* b, float* out, int size) {
 			}
 			out[i * size + j] = ret;
 		}
+	}
+}
+
+
+void matmul_normal2(const float* a, const float* b, float* out, int size) {
+	int i;
+	#ifdef _OPENMP
+	#pragma omp parallel for
+	#endif
+	for (i = 0; i < size; i++) {
+		int j;
+		for (j = 0; j < size; j++) {
+			out[i * size + j] = 0;
+		}
+	}
+	#ifdef _OPENMP
+	#pragma omp parallel for
+	#endif
+	for (i = 0; i < size; i++) {
+		int k, j;
+		for (k = 0; k < size; k++) {
+			for (j = 0; j < size; j++) {
+				out[i * size + j] += a[i * size + k] * b[k * size + j];
+			}
+		}
+	}
+}
+
+#ifndef CHUNK_I
+#define CHUNK_I 128
+#endif
+#ifndef CHUNK_J
+#define CHUNK_J 128
+#endif
+#ifndef CHUNK_K
+#define CHUNK_K 128
+#endif
+
+void matmul_normal3(const float* a, const float* b, float* out, int size) {
+	int i;
+	#ifdef _OPENMP
+	#pragma omp parallel
+	#endif
+	{
+		float *a_buf, *b_buf, *out_buf;
+		a_buf = malloc(sizeof(float) * CHUNK_I * CHUNK_K);
+		b_buf = malloc(sizeof(float) * CHUNK_K * CHUNK_J);
+		out_buf = malloc(sizeof(float) * CHUNK_I * CHUNK_J);
+		if (a_buf == NULL || b_buf == NULL || out_buf == NULL) {
+			fputs("malloc failed in matmul_normal3!\n", stderr);
+			exit(1);
+		}
+		#ifdef _OPENMP
+		#pragma omp for
+		#endif
+		for (i = 0; i < size; i += CHUNK_I) {
+			int j, k, bi, bj, bk;
+			int size_i = i + CHUNK_I <= size ? CHUNK_I : size - i;
+			for (j = 0; j < size; j += CHUNK_J) {
+				int size_j = j + CHUNK_J <= size ? CHUNK_J : size - j;
+				for (bi = 0; bi < size_i; bi++) {
+					for (bj = 0; bj < size_j; bj++) {
+						out_buf[bi * size_j + bj] = 0;
+					}
+				}
+				for (k = 0; k < size; k += CHUNK_K) {
+					int size_k = k + CHUNK_K <= size ? CHUNK_K : size - k;
+					for (bi = 0; bi < size_i; bi++) {
+						memcpy(a_buf + bi * size_k, a + (i + bi) * size + k, sizeof(float) * size_k);
+					}
+					for (bk = 0; bk < size_k; bk++) {
+						memcpy(b_buf + bk * size_j, b + (k + bk) * size + j, sizeof(float) * size_j);
+					}
+					for (bi = 0; bi < size_i; bi++) {
+						for (bk = 0; bk < size_k; bk++) {
+							for (bj = 0; bj < size_j; bj++) {
+								out_buf[bi * size_j + bj] += a_buf[bi * size_k + bk] * b_buf[bk * size_j + bj];
+							}
+						}
+					}
+				}
+				for (bi = 0; bi < size_i; bi++) {
+					memcpy(out + (i + bi) * size + j, out_buf + bi * size_j, sizeof(float) * size_j);
+				}
+			}
+		}
+		free(a_buf);
+		free(b_buf);
+		free(out_buf);
 	}
 }
 
@@ -151,6 +241,35 @@ int argc, char* argv[]) {
 	for (i = 0; i < size * size; i++) b[i] = rand() / (float)RAND_MAX;
 
 	printf("start calculation of size %d\n", size);
+
+	time_start = get_time();
+	matmul_normal(a, b, out_normal, size);
+	time_end = get_time();
+	printf("normal  calculaton time: %f seconds (%fGflop/s)\n", time_end - time_start,
+		flop / (time_end - time_start) * 1e-9);
+
+	time_start = get_time();
+	matmul_normal2(a, b, out, size);
+	time_end = get_time();
+	printf("normal2 calculaton time: %f seconds (%fGflop/s)\n", time_end - time_start,
+		flop / (time_end - time_start) * 1e-9);
+	diff_sum = 0;
+	for (i = 0; i < size * size; i++) {
+		diff_sum += fabs(out[i] - out_normal[i]);
+	}
+	printf("average difference with normal: %g\n", diff_sum / (size * size));
+
+	time_start = get_time();
+	matmul_normal3(a, b, out, size);
+	time_end = get_time();
+	printf("normal3 calculaton time: %f seconds (%fGflop/s)\n", time_end - time_start,
+		flop / (time_end - time_start) * 1e-9);
+	diff_sum = 0;
+	for (i = 0; i < size * size; i++) {
+		diff_sum += fabs(out[i] - out_normal[i]);
+	}
+	printf("average difference with normal: %g\n", diff_sum / (size * size));
+
 	time_start = get_time();
 
 #define CALL_AND_CHECK(name, func) \
@@ -186,21 +305,13 @@ int argc, char* argv[]) {
 	CALL_AND_CHECK("clFinish", clFinish(queue))
 
 	time_end = get_time();
-	printf("OpenCL calculaton time: %f seconds (%fGflop/s)\n", time_end - time_start,
+	printf("OpenCL  calculaton time: %f seconds (%fGflop/s)\n", time_end - time_start,
 		flop / (time_end - time_start) * 1e-9);
-	time_start = get_time();
-
-	matmul_normal(a, b, out_normal, size);
-
-	time_end = get_time();
-	printf("normal calculaton time: %f seconds (%fGflop/s)\n", time_end - time_start,
-		flop / (time_end - time_start) * 1e-9);
-
 	diff_sum = 0;
 	for (i = 0; i < size * size; i++) {
 		diff_sum += fabs(out[i] - out_normal[i]);
 	}
-	printf("average difference: %g\n", diff_sum / (size * size));
+	printf("average difference with normal: %g\n", diff_sum / (size * size));
 
 #undef CALL_AND_CHECK
 	free(a);
