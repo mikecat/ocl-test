@@ -232,13 +232,17 @@ int argc, char* argv[]) {
 	double time_start, time_end, flop;
 	int i;
 	float diff_sum;
-	int skip_normal = 0, skip_slow_normal = 0;
+	int skip_normal = 0, skip_slow_normal = 0, skip_mid_normal = 0, skip_opencl = 0;
 	char *env_str;
 
 	env_str = getenv("SKIP_NORMAL");
 	if (env_str != NULL) skip_normal = atoi(env_str);
 	env_str = getenv("SKIP_SLOW_NORMAL");
 	if (env_str != NULL) skip_slow_normal = atoi(env_str);
+	env_str = getenv("SKIP_MID_NORMAL");
+	if (env_str != NULL) skip_mid_normal = atoi(env_str);
+	env_str = getenv("SKIP_OPENCL");
+	if (env_str != NULL) skip_opencl= atoi(env_str);
 
 	if (size <= 0) {
 		fputs("matrix size must be positive\n", stderr);
@@ -279,70 +283,72 @@ int argc, char* argv[]) {
 		return 1;
 	}
 
+	if (!skip_opencl) {
 #ifdef CL_VERSION_2_0
-	queue = clCreateCommandQueueWithProperties(context, device, NULL, &error);
+		queue = clCreateCommandQueueWithProperties(context, device, NULL, &error);
 #else
-	queue = clCreateCommandQueue(context, device, 0, &error);
+		queue = clCreateCommandQueue(context, device, 0, &error);
 #endif
-	if (error != CL_SUCCESS) {
-		fprintf(stderr, "clCreateCommandQueue failed: %d\n", (int)error);
-		free(a); free(b); free(out); free(out_normal);
-		return 1;
-	}
+		if (error != CL_SUCCESS) {
+			fprintf(stderr, "clCreateCommandQueue failed: %d\n", (int)error);
+			free(a); free(b); free(out); free(out_normal);
+			return 1;
+		}
 
-	program = clCreateProgramWithSource(context, 1,
-		read_kernel != NULL ? (const char**)&read_kernel : &kernel_code, NULL, &error);
-	if (error != CL_SUCCESS) {
-		fprintf(stderr, "clCreateProgramWithSource failed: %d\n", (int)error);
-		free(a); free(b); free(out); free(out_normal);
-		clReleaseCommandQueue(queue);
-		return 1;
-	}
+		program = clCreateProgramWithSource(context, 1,
+			read_kernel != NULL ? (const char**)&read_kernel : &kernel_code, NULL, &error);
+		if (error != CL_SUCCESS) {
+			fprintf(stderr, "clCreateProgramWithSource failed: %d\n", (int)error);
+			free(a); free(b); free(out); free(out_normal);
+			clReleaseCommandQueue(queue);
+			return 1;
+		}
 
-	snprintf(option, sizeof(option), "-w -D LOCAL_BLOCK_SIZE=%zu", local_size[0]);
-	if ((error = clBuildProgram(program, 1, &device, option, NULL, NULL)) != CL_SUCCESS) {
-		fprintf(stderr, "clBuildProgram failed: %d\n", (int)error);
-		free(a); free(b); free(out); free(out_normal);
-		clReleaseProgram(program);
-		clReleaseCommandQueue(queue);
-		return 1;
-	}
+		snprintf(option, sizeof(option), "-w -D LOCAL_BLOCK_SIZE=%zu", local_size[0]);
+		if ((error = clBuildProgram(program, 1, &device, option, NULL, NULL)) != CL_SUCCESS) {
+			fprintf(stderr, "clBuildProgram failed: %d\n", (int)error);
+			free(a); free(b); free(out); free(out_normal);
+			clReleaseProgram(program);
+			clReleaseCommandQueue(queue);
+			return 1;
+		}
 
-	kernel = clCreateKernel(program, "matmul", &error);
-	if (error != CL_SUCCESS) {
-		fprintf(stderr, "clCreateKernel failed: %d\n", (int)error);
-		free(a); free(b); free(out); free(out_normal);
-		clReleaseProgram(program);
-		clReleaseCommandQueue(queue);
-		return 1;
-	}
+		kernel = clCreateKernel(program, "matmul", &error);
+		if (error != CL_SUCCESS) {
+			fprintf(stderr, "clCreateKernel failed: %d\n", (int)error);
+			free(a); free(b); free(out); free(out_normal);
+			clReleaseProgram(program);
+			clReleaseCommandQueue(queue);
+			return 1;
+		}
 
-	a_cl = clCreateBuffer(context, CL_MEM_READ_ONLY, matrix_data_size, NULL, &error);
-	if (error != CL_SUCCESS) {
-		fprintf(stderr, "clCreateBuffer for A failed: %d\n", (int)error);
-		free(a); free(b); free(out); free(out_normal);
-		clReleaseProgram(program);
-		clReleaseCommandQueue(queue);
-		return 1;
-	}
-	b_cl = clCreateBuffer(context, CL_MEM_READ_ONLY, matrix_data_size, NULL, &error);
-	if (error != CL_SUCCESS) {
-		fprintf(stderr, "clCreateBuffer for B failed: %d\n", (int)error);
-		free(a); free(b); free(out); free(out_normal);
-		clReleaseMemObject(a_cl);
-		clReleaseProgram(program);
-		clReleaseCommandQueue(queue);
-		return 1;
-	}
-	out_cl = clCreateBuffer(context, CL_MEM_WRITE_ONLY, matrix_data_size, NULL, &error);
-	if (error != CL_SUCCESS) {
-		fprintf(stderr, "clCreateBuffer for OUT failed: %d\n", (int)error);
-		free(a); free(b); free(out); free(out_normal);
-		clReleaseMemObject(a_cl);
-		clReleaseMemObject(b_cl);
-		clReleaseProgram(program);
-		clReleaseCommandQueue(queue);
-		return 1;
+		a_cl = clCreateBuffer(context, CL_MEM_READ_ONLY, matrix_data_size, NULL, &error);
+		if (error != CL_SUCCESS) {
+			fprintf(stderr, "clCreateBuffer for A failed: %d\n", (int)error);
+			free(a); free(b); free(out); free(out_normal);
+			clReleaseProgram(program);
+			clReleaseCommandQueue(queue);
+			return 1;
+		}
+		b_cl = clCreateBuffer(context, CL_MEM_READ_ONLY, matrix_data_size, NULL, &error);
+		if (error != CL_SUCCESS) {
+			fprintf(stderr, "clCreateBuffer for B failed: %d\n", (int)error);
+			free(a); free(b); free(out); free(out_normal);
+			clReleaseMemObject(a_cl);
+			clReleaseProgram(program);
+			clReleaseCommandQueue(queue);
+			return 1;
+		}
+		out_cl = clCreateBuffer(context, CL_MEM_WRITE_ONLY, matrix_data_size, NULL, &error);
+		if (error != CL_SUCCESS) {
+			fprintf(stderr, "clCreateBuffer for OUT failed: %d\n", (int)error);
+			free(a); free(b); free(out); free(out_normal);
+			clReleaseMemObject(a_cl);
+			clReleaseMemObject(b_cl);
+			clReleaseProgram(program);
+			clReleaseCommandQueue(queue);
+			return 1;
+		}
 	}
 
 	srand(334);
@@ -360,30 +366,32 @@ int argc, char* argv[]) {
 	}
 
 	if (!skip_normal) {
-		time_start = get_time();
-		matmul_normal2(a, b, out, size);
-		time_end = get_time();
-		printf("normal2 calculaton time: %f seconds (%fGflop/s)\n", time_end - time_start,
-			flop / (time_end - time_start) * 1e-9);
-		if (!skip_slow_normal) {
-			diff_sum = 0;
-			for (i = 0; i < size * size; i++) {
-				diff_sum += fabs(out[i] - out_normal[i]);
+		if (!skip_mid_normal) {
+			time_start = get_time();
+			matmul_normal2(a, b, out, size);
+			time_end = get_time();
+			printf("normal2 calculaton time: %f seconds (%fGflop/s)\n", time_end - time_start,
+				flop / (time_end - time_start) * 1e-9);
+			if (!skip_slow_normal) {
+				diff_sum = 0;
+				for (i = 0; i < size * size; i++) {
+					diff_sum += fabs(out[i] - out_normal[i]);
+				}
+				printf("average difference with normal: %g\n", diff_sum / (size * size));
 			}
-			printf("average difference with normal: %g\n", diff_sum / (size * size));
-		}
 
-		time_start = get_time();
-		matmul_normal3(a, b, out, size);
-		time_end = get_time();
-		printf("normal3 calculaton time: %f seconds (%fGflop/s)\n", time_end - time_start,
-			flop / (time_end - time_start) * 1e-9);
-		if (!skip_slow_normal) {
-			diff_sum = 0;
-			for (i = 0; i < size * size; i++) {
-				diff_sum += fabs(out[i] - out_normal[i]);
+			time_start = get_time();
+			matmul_normal3(a, b, out, size);
+			time_end = get_time();
+			printf("normal3 calculaton time: %f seconds (%fGflop/s)\n", time_end - time_start,
+				flop / (time_end - time_start) * 1e-9);
+			if (!skip_slow_normal) {
+				diff_sum = 0;
+				for (i = 0; i < size * size; i++) {
+					diff_sum += fabs(out[i] - out_normal[i]);
+				}
+				printf("average difference with normal: %g\n", diff_sum / (size * size));
 			}
-			printf("average difference with normal: %g\n", diff_sum / (size * size));
 		}
 
 		time_start = get_time();
@@ -400,49 +408,51 @@ int argc, char* argv[]) {
 		}
 	}
 
-	time_start = get_time();
+	if (!skip_opencl) {
+		time_start = get_time();
 
 #define CALL_AND_CHECK(name, func) \
-	if ((error = func) != CL_SUCCESS) { \
-		fprintf(stderr, name " failed: %d\n", (int)error); \
-		free(a); free(b); free(out); free(out_normal); \
-		clReleaseMemObject(a_cl); \
-		clReleaseMemObject(b_cl); \
-		clReleaseMemObject(out_cl); \
-		clReleaseProgram(program); \
-		clReleaseCommandQueue(queue); \
-		return 1; \
-	}
+		if ((error = func) != CL_SUCCESS) { \
+			fprintf(stderr, name " failed: %d\n", (int)error); \
+			free(a); free(b); free(out); free(out_normal); \
+			clReleaseMemObject(a_cl); \
+			clReleaseMemObject(b_cl); \
+			clReleaseMemObject(out_cl); \
+			clReleaseProgram(program); \
+			clReleaseCommandQueue(queue); \
+			return 1; \
+		}
 
 #define SET_KERNEL_ARG(index, value) \
-	CALL_AND_CHECK("clSetKernelArg for " #value, \
-		clSetKernelArg(kernel, index, sizeof(value), &value))
-	SET_KERNEL_ARG(0, a_cl)
-	SET_KERNEL_ARG(1, b_cl)
-	SET_KERNEL_ARG(2, out_cl)
-	SET_KERNEL_ARG(3, size)
+		CALL_AND_CHECK("clSetKernelArg for " #value, \
+			clSetKernelArg(kernel, index, sizeof(value), &value))
+		SET_KERNEL_ARG(0, a_cl)
+		SET_KERNEL_ARG(1, b_cl)
+		SET_KERNEL_ARG(2, out_cl)
+		SET_KERNEL_ARG(3, size)
 #undef SET_KERNEL_ARG
 
-	CALL_AND_CHECK("clEnqueueWriteBuffer",
-		clEnqueueWriteBuffer(queue, a_cl, CL_TRUE, 0, matrix_data_size, a, 0, NULL, NULL))
-	CALL_AND_CHECK("clEnqueueWriteBuffer",
-		clEnqueueWriteBuffer(queue, b_cl, CL_TRUE, 0, matrix_data_size, b, 0, NULL, NULL))
-	CALL_AND_CHECK("clEnqueueNDRangeKernel",
-		clEnqueueNDRangeKernel(queue, kernel, 2, NULL, global_size, local_size,
-			0, NULL, NULL))
-	CALL_AND_CHECK("clEnqueueReadBuffer",
-		clEnqueueReadBuffer(queue, out_cl, CL_TRUE, 0, matrix_data_size, out, 0, NULL, NULL))
-	CALL_AND_CHECK("clFinish", clFinish(queue))
+		CALL_AND_CHECK("clEnqueueWriteBuffer",
+			clEnqueueWriteBuffer(queue, a_cl, CL_TRUE, 0, matrix_data_size, a, 0, NULL, NULL))
+		CALL_AND_CHECK("clEnqueueWriteBuffer",
+			clEnqueueWriteBuffer(queue, b_cl, CL_TRUE, 0, matrix_data_size, b, 0, NULL, NULL))
+		CALL_AND_CHECK("clEnqueueNDRangeKernel",
+			clEnqueueNDRangeKernel(queue, kernel, 2, NULL, global_size, local_size,
+				0, NULL, NULL))
+		CALL_AND_CHECK("clEnqueueReadBuffer",
+			clEnqueueReadBuffer(queue, out_cl, CL_TRUE, 0, matrix_data_size, out, 0, NULL, NULL))
+		CALL_AND_CHECK("clFinish", clFinish(queue))
 
-	time_end = get_time();
-	printf("OpenCL  calculaton time: %f seconds (%fGflop/s)\n", time_end - time_start,
-		flop / (time_end - time_start) * 1e-9);
-	if (!skip_normal && !skip_slow_normal) {
-		diff_sum = 0;
-		for (i = 0; i < size * size; i++) {
-			diff_sum += fabs(out[i] - out_normal[i]);
+		time_end = get_time();
+		printf("OpenCL  calculaton time: %f seconds (%fGflop/s)\n", time_end - time_start,
+			flop / (time_end - time_start) * 1e-9);
+		if (!skip_normal && !skip_slow_normal) {
+			diff_sum = 0;
+			for (i = 0; i < size * size; i++) {
+				diff_sum += fabs(out[i] - out_normal[i]);
+			}
+			printf("average difference with normal: %g\n", diff_sum / (size * size));
 		}
-		printf("average difference with normal: %g\n", diff_sum / (size * size));
 	}
 
 #undef CALL_AND_CHECK
@@ -451,11 +461,13 @@ int argc, char* argv[]) {
 	free(out);
 	free(out_normal);
 	free(read_kernel);
-	clReleaseMemObject(a_cl);
-	clReleaseMemObject(b_cl);
-	clReleaseMemObject(out_cl);
-	clReleaseKernel(kernel);
-	clReleaseProgram(program);
-	clReleaseCommandQueue(queue);
+	if (!skip_opencl) {
+		clReleaseMemObject(a_cl);
+		clReleaseMemObject(b_cl);
+		clReleaseMemObject(out_cl);
+		clReleaseKernel(kernel);
+		clReleaseProgram(program);
+		clReleaseCommandQueue(queue);
+	}
 	return 0;
 }
