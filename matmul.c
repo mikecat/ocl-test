@@ -3,6 +3,7 @@
 #include <string.h>
 #include <sys/time.h>
 #include <math.h>
+#include <immintrin.h>
 #include "CL/cl.h"
 
 char* read_file(const char* fileName);
@@ -135,6 +136,82 @@ void matmul_normal3(const float* a, const float* b, float* out, int size) {
 		free(a_buf);
 		free(b_buf);
 		free(out_buf);
+	}
+}
+
+#if CHUNK_J % 8 != 0
+#error CHUNK_J must be multiple of 8
+#endif
+
+void matmul_normal4(const float* a, const float* b, float* out, int size) {
+	int i;
+	#ifdef _OPENMP
+	#pragma omp parallel
+	#endif
+	{
+		float *a_buf_raw, *b_buf_raw, *out_buf_raw;
+		float *a_buf, *b_buf, *out_buf;
+		a_buf_raw = malloc(sizeof(float) * (CHUNK_I * CHUNK_K + 8));
+		b_buf_raw = malloc(sizeof(float) * (CHUNK_K * CHUNK_J + 8));
+		out_buf_raw = malloc(sizeof(float) * (CHUNK_I * CHUNK_J + 8));
+		if (a_buf_raw == NULL || b_buf_raw == NULL || out_buf_raw == NULL) {
+			fputs("malloc failed in matmul_normal3!\n", stderr);
+			exit(1);
+		}
+		for (a_buf = a_buf_raw; (uintptr_t)a_buf % 32 != 0; a_buf++);
+		for (b_buf = b_buf_raw; (uintptr_t)b_buf % 32 != 0; b_buf++);
+		for (out_buf = out_buf_raw; (uintptr_t)out_buf % 32 != 0; out_buf++);
+		#ifdef _OPENMP
+		#pragma omp for
+		#endif
+		for (i = 0; i < size; i += CHUNK_I) {
+			int j, k, bi, bj, bk;
+			int size_i = i + CHUNK_I <= size ? CHUNK_I : size - i;
+			for (j = 0; j < size; j += CHUNK_J) {
+				int size_j = j + CHUNK_J <= size ? CHUNK_J : size - j;
+				__m256 zero = _mm256_setzero_ps();
+				for (bi = 0; bi < size_i; bi++) {
+					bj = 0;
+					for (; bj + 8 <= size_j; bj += 8) {
+						_mm256_store_ps(&out_buf[bi * CHUNK_J + bj], zero);
+					}
+					for (; bj < size_j; bj++) {
+						out_buf[bi * CHUNK_J + bj] = 0;
+					}
+				}
+				for (k = 0; k < size; k += CHUNK_K) {
+					int size_k = k + CHUNK_K <= size ? CHUNK_K : size - k;
+					for (bi = 0; bi < size_i; bi++) {
+						memcpy(a_buf + bi * CHUNK_K, a + (i + bi) * size + k, sizeof(float) * size_k);
+					}
+					for (bk = 0; bk < size_k; bk++) {
+						memcpy(b_buf + bk * CHUNK_J, b + (k + bk) * size + j, sizeof(float) * size_j);
+					}
+					for (bi = 0; bi < size_i; bi++) {
+						for (bk = 0; bk < size_k; bk++) {
+							__m256 a_mm = _mm256_set1_ps(a_buf[bi * CHUNK_K + bk]);
+							bj = 0;
+							for (; bj + 8 <= size_j; bj += 8) {
+								__m256 out_mm, b_mm;
+								out_mm = _mm256_load_ps(&out_buf[bi * CHUNK_J + bj]);
+								b_mm = _mm256_load_ps(&b_buf[bk * CHUNK_J + bj]);
+								out_mm = _mm256_fmadd_ps(a_mm, b_mm, out_mm);
+								_mm256_store_ps(&out_buf[bi * CHUNK_J + bj], out_mm);
+							}
+							for (; bj < size_j; bj++) {
+								out_buf[bi * CHUNK_J + bj] += a_buf[bi * CHUNK_K + bk] * b_buf[bk * CHUNK_J + bj];
+							}
+						}
+					}
+				}
+				for (bi = 0; bi < size_i; bi++) {
+					memcpy(out + (i + bi) * size + j, out_buf + bi * CHUNK_J, sizeof(float) * size_j);
+				}
+			}
+		}
+		free(a_buf_raw);
+		free(b_buf_raw);
+		free(out_buf_raw);
 	}
 }
 
@@ -300,6 +377,19 @@ int argc, char* argv[]) {
 		matmul_normal3(a, b, out, size);
 		time_end = get_time();
 		printf("normal3 calculaton time: %f seconds (%fGflop/s)\n", time_end - time_start,
+			flop / (time_end - time_start) * 1e-9);
+		if (!skip_slow_normal) {
+			diff_sum = 0;
+			for (i = 0; i < size * size; i++) {
+				diff_sum += fabs(out[i] - out_normal[i]);
+			}
+			printf("average difference with normal: %g\n", diff_sum / (size * size));
+		}
+
+		time_start = get_time();
+		matmul_normal4(a, b, out, size);
+		time_end = get_time();
+		printf("normal4 calculaton time: %f seconds (%fGflop/s)\n", time_end - time_start,
 			flop / (time_end - time_start) * 1e-9);
 		if (!skip_slow_normal) {
 			diff_sum = 0;
