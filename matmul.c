@@ -30,11 +30,12 @@ static const char* kernel_code =
 ;
 
 void matmul_normal(const float* a, const float* b, float* out, int size) {
-	int i, j, k;
+	int i;
 	#ifdef _OPENMP
 	#pragma omp parallel for
 	#endif
 	for (i = 0; i < size; i++) {
+		int j, k;
 		for (j = 0; j < size; j++) {
 			float ret = 0;
 			for (k = 0; k < size; k++) {
